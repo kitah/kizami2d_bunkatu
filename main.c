@@ -8,62 +8,6 @@
 #include "bpf.h"
 #include "func.h"
 
-// フラグ
-#define QUANT_FLG   0
-#define ONOISE_FLG  0
-#define LIMIT_FLG   0
-#define SRAND_FLG   0
-
-// LPFなどの範囲
-#define EPS    1.0E-8
-#define LRG    1.0E+8
-#define NHP        11 //9
-#define NHLPF      25
-#define NHBPF       3
-
-// レンズ係数
-#define LENS_K    1.6
-
-// ブロックサイズBSN, BSM ブロック数NB, MB 
-#define BSN        13 //31
-#define BSM        13 //31
-#define BSNN       15
-#define BSMM       15
-#define NB         24 //8
-#define MB         16 //6
-#define NX   (BSN*NB)
-#define NY   (BSM*MB)
-#define NNB        20//20
-#define MMB        13//13
-#define NNX  (BSNN*NNB) // 15*20
-#define NNY  (BSMM*MMB) // 15*13
-#define INBS       5
-
-
-// 拡大率K D0-D1の範囲に物体 観測画像NZ枚 合焦面ZAからDZずつ 
-#define K           8
-#define D0        0.5
-#define D1        1.5 //D0
-#define NZ          3
-#define ZA        0.0
-#define DZ        1.0
-
-// 観測雑音のやつかな
-#define ON_SGM    0.5
-
-// d, kの推定には3回刻むのでそのためのやつ
-#define DD_F    0.025
-#define DD_S    0.005
-#define DD      0.001
-#define DDN        20
-
-#define KDD_F    0.25
-#define KDD_S    0.05
-#define KD       0.01
-#define KDN         5
-
-#define QQ        100 // quant
-
 /* go[NZ][NX][NY]  
  * | NHP |  NHP  | NHP |
  * | NHP | NX*NY | NHP | 
@@ -111,13 +55,14 @@ int main(void){
   double ***go, ***g_sff, ***y, **dy01, **dy12, **dy20, ***p, ***go_t;
   double **d, **d_model, **d_est, **k_est, **d_sff, **k_sff, ***E;
   double **dm_est, **dp_est, ***ydm, ***yd, ***ydp, **dp_model, **dm_model;
-  float data[(NHP+NX+NHP) * (NHP+NY+NHP)];
-  double dmin, kmin, Emin, dtest, ktest, z, sgm;
+  //float data[(NHP+NX+NHP) * (NHP+NY+NHP)];
+  double data[(NHP+NX+NHP) * (NHP+NY+NHP)];
+  double dmin, kmin, Emin, dtest, ktest, z, sgm, d_tmp;
   double EE[3], sum_EE = 0.0, tmp, RMSE;
   time_t t1, t2;
   t1 = time(NULL);
 
-  double alpha = 0.0, dmax[20];
+  double alpha = 0.0, dmax[NNB], d_min[NNB];
   
 #if SRAND_FLG == 1
   srandom(time(NULL));
@@ -199,17 +144,17 @@ int main(void){
   }
   for(zn = 0 ; zn < 2*NZ ; zn++){
     if((ydm[zn] = (double **)malloc(sizeof(double *) * (INBS + 4*NHP))) == NULL ||
-       (yd[zn] = (double **)malloc(sizeof(double *) * (INBS + 4*NHP))) == NULL ||
+       (yd[zn] = (double **)malloc(sizeof(double *) * (INBS + EXBS*2 + 4*NHP))) == NULL ||
        (ydp[zn] = (double **)malloc(sizeof(double *) * (INBS + 4*NHP))) == NULL){
       fprintf(stderr, "\nError : malloc\n\n");exit(1);
     }
     ydm[zn] += 2*NHP;
     yd[zn] += 2*NHP;
     ydp[zn] += 2*NHP;
-    for(n = -2*NHP ; n < INBS + 2*NHP ; n++){
-      if((ydm[zn][n] = (double *)malloc(sizeof(double ) * (INBS + 4*NHP))) == NULL ||
-	 (yd[zn][n] = (double *)malloc(sizeof(double ) * (INBS + 4*NHP))) == NULL ||
-	 (ydp[zn][n] = (double *)malloc(sizeof(double ) * (INBS + 4*NHP))) == NULL){
+    for(n = -2*NHP ; n < INBS + EXBS*2 + 2*NHP ; n++){
+      if((ydm[zn][n] = (double *)malloc(sizeof(double ) * (BSMM + 4*NHP))) == NULL ||
+	 (yd[zn][n] = (double *)malloc(sizeof(double ) * (INBS + EXBS*2 + 4*NHP))) == NULL ||
+	 (ydp[zn][n] = (double *)malloc(sizeof(double ) * (BSMM + 4*NHP))) == NULL){
 	fprintf(stderr, "\nError : malloc\n\n");exit(1);
       }
       ydm[zn][n] += 2*NHP;
@@ -220,17 +165,23 @@ int main(void){
   
 
   // dy01, dy12, dy20[BSNN][BSMM]
-  if ((dy01  = (double **)malloc(sizeof(double *) * BSNN) ) == NULL ||
-      (dy12  = (double **)malloc(sizeof(double *) * BSNN) ) == NULL ||
-      (dy20  = (double **)malloc(sizeof(double *) * BSNN) ) == NULL) {
+  if ((dy01  = (double **)malloc(sizeof(double *) * (BSNN + 2*NHP)) ) == NULL ||
+      (dy12  = (double **)malloc(sizeof(double *) * (BSNN + 2*NHP)) ) == NULL ||
+      (dy20  = (double **)malloc(sizeof(double *) * (BSNN + 2*NHP)) ) == NULL) {
         fprintf(stderr, "\nError : malloc\n\n"); exit(1);
   }
-  for(n = 0 ; n < BSNN ; n++) {
-    if ((dy01[n]  = (double *)malloc(sizeof(double) * BSMM) ) == NULL ||
-        (dy12[n]  = (double *)malloc(sizeof(double) * BSMM) ) == NULL ||
-        (dy20[n]  = (double *)malloc(sizeof(double) * BSMM) ) == NULL) {
+  dy01 += NHP;
+  dy12 += NHP;
+  dy20 += NHP;
+  for(n = -NHP ; n < BSNN  + NHP; n++) {
+    if ((dy01[n]  = (double *)malloc(sizeof(double) * (BSMM + 2*NHP)) ) == NULL ||
+        (dy12[n]  = (double *)malloc(sizeof(double) * (BSMM + 2*NHP)) ) == NULL ||
+        (dy20[n]  = (double *)malloc(sizeof(double) * (BSMM + 2*NHP)) ) == NULL) {
           fprintf(stderr, "\nError : malloc\n\n"); exit(1);
     }
+    dy01[n] += NHP;
+    dy12[n] += NHP;
+    dy20[n] += NHP;
   }
 
   // p[zn][2*NHP+1][2*NHP+1]
@@ -311,45 +262,67 @@ int main(void){
     }
   }
 
-
   //---------------------------------------------------------------------------
   // d[]に対象物体のdepth形状を設定
+#if HEIMEN == 0
   for(n = -(2*NHP*K + NHLPF) ; n < (NNX*K + 2*NHP*K + NHLPF) ; n++){
     for(m = -(2*NHP*K + NHLPF) ; m < (NNY*K + 2*NHP*K + NHLPF) ; m++){    
       d[n][m] = D0 + (D1-D0) / (double)(NX*K - 1) * n;
     }
   }
+#endif
+
+#if HEIMEN == 1
+  for(n = -(2*NHP*K + NHLPF) ; n < (NNX*K + 2*NHP*K + NHLPF) ; n++){
+    for(m = -(2*NHP*K + NHLPF) ; m < (NNY*K + 2*NHP*K + NHLPF) ; m++){    
+      d[n][m] = 0.9;
+    }
+  }
+#endif
   
   sprintf(flnm, "./d.dat");
   fp = fopen(flnm, "w");
   //for(n = -(2*NHP*K + NHLPF) ; n < (NX*K + 2*NHP*K + NHLPF) ; n++){
   //for(m = -(2*NHP*K + NHLPF) ; m < (NY*K + 2*NHP*K + NHLPF) ; m++){}
-  for(n = 0 ; n < (15*20) ; n++){
-    for(m = 0 ; m < (15*13) ; m++){
+  for(n = 0 ; n < NNX ; n++){
+    for(m = 0 ; m < NNY ; m++){
       fprintf(fp, "%d %d %f\n", n, m, d[n*K][m*K]);
     }
     fprintf(fp, "\n");
   }
   fclose(fp);
   
-  for(n = 0 ; n < 20 ; n++){
-    dmax[n] = d[n*15*K + 15*K-K][0];
+  for(n = 0 ; n < NNB ; n++){
+    dmax[n] = d[n*BSNN*K + BSNN*K-K][0];
   }
   sprintf(flnm, "./dmax.dat");
   fp = fopen(flnm, "w");
-  for(n = 0 ; n < 20 ; n++){
+  for(n = 0 ; n < NNB ; n++){
       fprintf(fp, "%d %f\n", n, dmax[n]);
   }
   fclose(fp);
 
+  for(n = 0 ; n < NNB ; n++){
+    d_min[n] = d[n*BSNN*K][0];
+  }
+  sprintf(flnm, "./d_min.dat");
+  fp = fopen(flnm, "w");
+  for(n = 0 ; n < NNB ; n++){
+      fprintf(fp, "%d %f\n", n, d_min[n]);
+  }
+  fclose(fp);
   
   
   //---------------------------------------------------------------------------  
   // freedする data -> goへ
+#if HEIMEN == 0
   for(zn = 0 ; zn < NZ ; zn++){
-    sprintf(flnm, "./zn3_0515/d0515_bi_g%d", zn);
+    //sprintf(flnm, "./zn3_0515/d0515_bi_g%d", zn);
+    sprintf(flnm, "./../obs_img/k16/d0515/d0515_ra_0%d.bin", zn);
     fp = fopen(flnm, "r");
-    nr = fread(data, sizeof(float), (NHP+NX+NHP) * (NHP+NY+NHP), fp);
+    //nr = fread(data, sizeof(float), (NHP+NX+NHP) * (NHP+NY+NHP), fp);
+    nr = fread(data, sizeof(double), (NHP+NX+NHP) * (NHP+NY+NHP), fp);
+    printf("nr = %f\n", nr);
     nw = (NHP+NX+NHP) * (NHP+NY+NHP);
     if(nr != nw){
       fprintf(stderr, "\nError : fread\n\n");exit(1);
@@ -360,8 +333,26 @@ int main(void){
         go[zn][n][m] = (double)data[(m+NHP) * (NHP+NX+NHP) + (n+NHP)];
       }
     }
-      
   }
+#endif
+
+  // 平面
+#if HEIMEN == 1
+  for(zn = 0 ; zn < NZ ; zn++){
+    sprintf(flnm, "./d09/d09_bi_g%d", zn);
+    fp = fopen(flnm, "r");
+    nr = fread(data, sizeof(float), (NHP+NX+NHP) * (NHP+NY+NHP), fp);
+    nw = (NHP+NX+NHP) * (NHP+NY+NHP);
+    if(nr != nw){
+      fprintf(stderr, "\nError : fread\n\n");exit(1);
+    }
+    for(m = -NHP ; m < NY + NHP ; m++){
+      for(n = -NHP ; n < NX + NHP ; n++){
+	go[zn][n][m] = (double)data[(m+NHP) * (NHP+NX+NHP) + (n+NHP)];
+      }
+    }
+  }
+#endif
 
   //---------------------------------------------------------------------------
   // go[zn][]に観測雑音を付与、量子化してgo[zn][]に
@@ -409,12 +400,12 @@ int main(void){
     sprintf(flnm, "./model/bs15_go%d.dat", zn);
     //cIMAGE(NNX + 2*NHP, NNY + 2*NHP, &img_go, MONO);
     fp = fopen(flnm, "w");
-    for(n = -NHP ; n < NNX ; n++){
-      for(m = -NHP ; m < NNY ; m++){
+    for(n = -NHP ; n < NNX + NHP; n++){
+      for(m = -NHP ; m < NNY + NHP; m++){
 	go_t[zn][n][m] = go[zn][n][m];
       }
     }
-    
+    /*
     for(n = 0 ; n < NHP ; n++){
       for(m = 0 ; m < NHP ; m++){
 	go_t[zn][n + NNX][m + NNY] = go[zn][n + NX][m + NY];
@@ -431,7 +422,7 @@ int main(void){
       for(m = 0 ; m < NHP ; m++){
 	go_t[zn][n][m + NNY] = go[zn][n][m + NY];
       }
-    }
+      }*/
     
     for(n = -NHP ; n < NNX + NHP ; n++){
       for(m = -NHP ; m < NNY + NHP ; m++){
@@ -473,7 +464,7 @@ int main(void){
           }
 	  
 	  // y[0]~y[5]をクリア
-          for(n = -2*NHP ; n < BSNN + 2*NHP ; n++){
+          /*for(n = -2*NHP ; n < BSNN + 2*NHP ; n++){
             for(m = -2*NHP ; m < BSMM + 2*NHP ; m++){
 	      y[0][n][m] = 0.0;
               y[1][n][m] = 0.0;
@@ -482,9 +473,10 @@ int main(void){
 	      y[4][n][m] = 0.0;
               y[5][n][m] = 0.0;
 	    }
-          }/*
-	  for(n = -2*NHP ; n < INBS + 2*NHP ; n++){
-	    for(m = -2*NHP ; m < INBS + 2*NHP ; m++){
+          }*/
+	  
+	  for(n = -2*NHP ; n < INBS + EXBS*2 + 2*NHP ; n++){
+	    for(m = -2*NHP ; m < INBS + EXBS*2 + 2*NHP ; m++){
 	      yd[0][n][m] = 0.0;
 	      yd[1][n][m] = 0.0;
 	      yd[2][n][m] = 0.0;
@@ -492,10 +484,10 @@ int main(void){
 	      yd[4][n][m] = 0.0;
 	      yd[5][n][m] = 0.0;
 	    }
-	    }*/
+	  }
 	  
           // y[0]~y[5]を生成
-          for(n = -NHP ; n < BSNN + NHP ; n++){
+          /*for(n = -NHP ; n < BSNN + NHP ; n++){
             for(m = -NHP ; m < BSMM + NHP ; m++){
               for(k = -NHP ; k <= NHP ; k++){
                 for(l = -NHP ; l <= NHP ; l++){
@@ -511,28 +503,31 @@ int main(void){
                 }
               }
             }
-          }
-	  /*for(n = -NHP ; n < INBS + NHP ; n++){
-            for(m = -NHP ; m < INBS + NHP ; m++){
+	    }*/
+	  for(n = -NHP ; n < INBS + EXBS*2 + NHP ; n++){
+            for(m = -NHP ; m < INBS + EXBS + NHP ; m++){
               for(k = -NHP ; k <= NHP ; k++){
                 for(l = -NHP ; l <= NHP ; l++){
                   // 0-1
-                  yd[0][n + k][m + l] += go_t[0][n + b0[0] + INBS][m + b0[1] + INBS] * p[1][k][l];
-                  yd[1][n + k][m + l] += go_t[1][n + b0[0] + INBS][m + b0[1] + INBS] * p[0][k][l];
+                  yd[0][n + k][m + l] += go_t[0][n + b0[0] + INBS - EXBS][m + b0[1] + INBS] * p[1][k][l];
+                  yd[1][n + k][m + l] += go_t[1][n + b0[0] + INBS - EXBS][m + b0[1] + INBS] * p[0][k][l];
                   // 1-2
-                  yd[2][n + k][m + l] += go_t[1][n + b0[0] + INBS][m + b0[1] + INBS] * p[2][k][l];
-                  yd[3][n + k][m + l] += go_t[2][n + b0[0] + INBS][m + b0[1] + INBS] * p[1][k][l];
+                  yd[2][n + k][m + l] += go_t[1][n + b0[0] + INBS - EXBS][m + b0[1] + INBS] * p[2][k][l];
+                  yd[3][n + k][m + l] += go_t[2][n + b0[0] + INBS - EXBS][m + b0[1] + INBS] * p[1][k][l];
                   // 2-0
-                  yd[4][n + k][m + l] += go_t[0][n + b0[0] + INBS][m + b0[1] + INBS] * p[2][k][l];
-                  yd[5][n + k][m + l] += go_t[2][n + b0[0] + INBS][m + b0[1] + INBS] * p[0][k][l];
+                  yd[4][n + k][m + l] += go_t[0][n + b0[0] + INBS - EXBS][m + b0[1] + INBS] * p[2][k][l];
+                  yd[5][n + k][m + l] += go_t[2][n + b0[0] + INBS - EXBS][m + b0[1] + INBS] * p[0][k][l];
                 }
               }
             }
-	    }*/
-	  
+	  }
+
+	  // EXBSを用いて差分を取る際のブロックを可変に
           // 差分をとる
-          for(n = 0 ; n < BSNN ; n++){
-            for(m = 0 ; m < BSMM ; m++){
+          //for(n = 0 ; n < BSNN ; n++){
+	  //for(m = 0 ; m < BSMM ; m++){
+	  for(n = INBS - EXBS ; n < INBS*2 + EXBS ; n++){
+	  for(m = INBS - EXBS ; m < INBS*2 + EXBS ; m++){
               dy01[n][m] = y[0][n][m] - y[1][n][m];
               dy12[n][m] = y[2][n][m] - y[3][n][m];
               dy20[n][m] = y[4][n][m] - y[5][n][m];
@@ -541,8 +536,10 @@ int main(void){
   
           // 誤差EEの評価
           EE[0] = EE[1] = EE[2] = 0.0;
-          for(n = 0 ; n < BSNN ; n++){
-            for(m = 0 ; m < BSMM ; m++){
+          //for(n = 0 ; n < BSNN ; n++){
+	  //for(m = 0 ; m < BSMM ; m++){
+	  for(n = INBS - EXBS ; n < INBS*2 + EXBS ; n++){
+	  for(m = INBS - EXBS ; m < INBS*2 + EXBS ; m++){
               EE[0] += dy01[n][m] * dy01[n][m];
               EE[1] += dy12[n][m] * dy12[n][m];
               EE[2] += dy20[n][m] * dy20[n][m];              
@@ -570,6 +567,7 @@ int main(void){
 	    }*/
 	    
           // 誤差EEを最小にするd, k
+	  sum_EE = 0.0;
           sum_EE = EE[0] + EE[1] + EE[2];
 	  //printf("   sumEE = %f\n", sum_EE);
           if(Emin > sum_EE){
@@ -622,25 +620,31 @@ int main(void){
             }
           }
 
-          // 差分
-          for(n = 0 ; n < BSNN ; n++){
-            for(m = 0 ; m < BSMM ; m++){
+    	  // EXBSを用いて差分を取る際のブロックを可変に
+          // 差分をとる
+          //for(n = 0 ; n < BSNN ; n++){
+	  //for(m = 0 ; m < BSMM ; m++){
+	  for(n = INBS - EXBS ; n < INBS*2 + EXBS ; n++){
+	    for(m = INBS - EXBS ; m < INBS*2 + EXBS ; m++){
               dy01[n][m] = y[0][n][m] - y[1][n][m];
               dy12[n][m] = y[2][n][m] - y[3][n][m];
               dy20[n][m] = y[4][n][m] - y[5][n][m];
             }
           }
-
+  
           // 誤差EEの評価
           EE[0] = EE[1] = EE[2] = 0.0;
-          for(n = 0 ; n < BSNN ; n++){
-            for(m = 0 ; m < BSMM ; m++){
+          //for(n = 0 ; n < BSNN ; n++){
+	  //for(m = 0 ; m < BSMM ; m++){
+	  for(n = INBS - EXBS ; n < INBS*2 + EXBS ; n++){
+	    for(m = INBS - EXBS ; m < INBS*2 + EXBS ; m++){
               EE[0] += dy01[n][m] * dy01[n][m];
               EE[1] += dy12[n][m] * dy12[n][m];
               EE[2] += dy20[n][m] * dy20[n][m];              
             }
-          }
-          //sum_EE = 0.0;
+	  }
+	  
+          sum_EE = 0.0;
           sum_EE = EE[0] + EE[1] + EE[2];
 
           // 誤差EEを最小にするd, kの最小値を探索
@@ -693,24 +697,30 @@ int main(void){
             }
           }
 
-          // 差分
-          for(n = 0 ; n < BSNN ; n++){
-            for(m = 0 ; m < BSMM ; m++){
+	  // EXBSを用いて差分を取る際のブロックを可変に
+          // 差分をとる
+          //for(n = 0 ; n < BSNN ; n++){
+	  //for(m = 0 ; m < BSMM ; m++){
+	  for(n = INBS - EXBS ; n < INBS*2 + EXBS ; n++){
+	    for(m = INBS - EXBS ; m < INBS*2 + EXBS ; m++){
               dy01[n][m] = y[0][n][m] - y[1][n][m];
               dy12[n][m] = y[2][n][m] - y[3][n][m];
               dy20[n][m] = y[4][n][m] - y[5][n][m];
             }
           }
-
+  
           // 誤差EEの評価
           EE[0] = EE[1] = EE[2] = 0.0;
-          for(n = 0 ; n < BSNN ; n++){
-            for(m = 0 ; m < BSMM ; m++){
+          //for(n = 0 ; n < BSNN ; n++){
+	  //for(m = 0 ; m < BSMM ; m++){
+	  for(n = INBS - EXBS ; n < INBS*2 + EXBS ; n++){
+	    for(m = INBS - EXBS ; m < INBS*2 + EXBS ; m++){
               EE[0] += dy01[n][m] * dy01[n][m];
               EE[1] += dy12[n][m] * dy12[n][m];
               EE[2] += dy20[n][m] * dy20[n][m];              
             }
-          }
+	  }
+	  
           sum_EE = 0.0;
           sum_EE = EE[0] + EE[1] + EE[2];
 
@@ -732,8 +742,9 @@ int main(void){
     }
   }
   printf("\n");
-  
-  // d0を求めたので、αを求める
+
+  //-----------------------------------------------------------------------------
+  // d0を求めたので、dpを求める
   printf("---dp start---\n");
   for(bn = 0 ; bn < NNB ; bn++){ // 20 * 13
     printf("bn = %d\n", bn);
@@ -745,111 +756,118 @@ int main(void){
       b0[1] = bm * BSMM;     //  0, 13, 26...
       b1[1] = b0[1] + BSMM;  // 13, 26, 39...
       bc[1] = b0[1] + hbsm;
-
+      
       alpha = (dmax[bn] - d_est[bn][bm])/hbsn;
+      //printf(" alpha = %f\n", alpha);
       dmin = 0.0;
       kmin = 0.0;
       Emin = LRG;
+      d_tmp = 0.0;
       sprintf(flnm, "./Edk/Edpk%02d_%02d.dat", bn, bm);
       fp = fopen(flnm, "w");
-
+      d_tmp = d_est[bn][bm] + INBS*alpha;
+ 
       // d,kに対するEの最小値探索
       // DD ni sita
-      //for(dtest = 1.0 - DD_F*DDN ; dtest <= 1.0 + DD_F*DDN ; dtest+=DD_F){
+      for(dtest =  d_tmp - 0.01 ; dtest <= d_tmp + 0.01 ; dtest+=DD){
           // p0, p1, p2を生成
-      for(zn = 0 ; zn < NZ ; zn++){
-	z = ZA + DZ * (double)zn;
-	sgm = LENS_K * fabs(z - (d_est[bn][bm] + 5*alpha));
-	hsamp_gauss(2*NHP + 1, sgm, p[zn]);
-      }
+	for(zn = 0 ; zn < NZ ; zn++){
+	  z = ZA + DZ * (double)zn;
+	  sgm = LENS_K * fabs(z - dtest);
+	  hsamp_gauss(2*NHP + 1, sgm, p[zn]);
+	}
 
-	  // y[0]~y[5]をクリア
-          for(n = -2*NHP ; n < INBS + 2*NHP ; n++){
-	    for(m = -2*NHP ; m < INBS + 2*NHP ; m++){
-	      ydp[0][n][m] = 0.0;
-	      ydp[1][n][m] = 0.0;
-	      ydp[2][n][m] = 0.0;
-	      ydp[3][n][m] = 0.0;
-	      ydp[4][n][m] = 0.0;
-	      ydp[5][n][m] = 0.0;
+	// y[0]~y[5]をクリア
+	for(n = -2*NHP ; n < INBS + 2*NHP ; n++){
+	  //for(m = -2*NHP ; m < INBS + 2*NHP ; m++){
+	    for(m = -2*NHP ; m < BSMM + 2*NHP ; m++){
+	    ydp[0][n][m] = 0.0;
+	    ydp[1][n][m] = 0.0;
+	    ydp[2][n][m] = 0.0;
+	    ydp[3][n][m] = 0.0;
+	    ydp[4][n][m] = 0.0;
+	    ydp[5][n][m] = 0.0;
+	  }
+	}
+
+	// y[0]~y[5]を生成
+	/*for(n = -NHP ; n < INBS + NHP ; n++){
+	  for(m = -NHP ; m < INBS + NHP ; m++){
+	    for(k = -NHP ; k <= NHP ; k++){
+	      for(l = -NHP ; l <= NHP ; l++){
+		// 0-1
+		ydp[0][n + k][m + l] += go_t[0][n + b0[0] + INBS*2][m + b0[1] + INBS] * p[1][k][l];
+		ydp[1][n + k][m + l] += go_t[1][n + b0[0] + INBS*2][m + b0[1] + INBS] * p[0][k][l];
+		// 1-2
+		ydp[2][n + k][m + l] += go_t[1][n + b0[0] + INBS*2][m + b0[1] + INBS] * p[2][k][l];
+		ydp[3][n + k][m + l] += go_t[2][n + b0[0] + INBS*2][m + b0[1] + INBS] * p[1][k][l];
+		// 2-0
+		ydp[4][n + k][m + l] += go_t[0][n + b0[0] + INBS*2][m + b0[1] + INBS] * p[2][k][l];
+		ydp[5][n + k][m + l] += go_t[2][n + b0[0] + INBS*2][m + b0[1] + INBS] * p[0][k][l];
+	      }
 	    }
 	  }
-	  
-          // y[0]~y[5]を生成
-          for(n = -NHP ; n < INBS + NHP ; n++){
-            for(m = -NHP ; m < INBS + NHP ; m++){
-              for(k = -NHP ; k <= NHP ; k++){
-                for(l = -NHP ; l <= NHP ; l++){
-                  // 0-1
-                  ydp[0][n + k][m + l] += go_t[0][n + b0[0] + INBS*2][m + b0[1] + INBS] * p[1][k][l];
-                  ydp[1][n + k][m + l] += go_t[1][n + b0[0] + INBS*2][m + b0[1] + INBS] * p[0][k][l];
-                  // 1-2
-                  ydp[2][n + k][m + l] += go_t[1][n + b0[0] + INBS*2][m + b0[1] + INBS] * p[2][k][l];
-                  ydp[3][n + k][m + l] += go_t[2][n + b0[0] + INBS*2][m + b0[1] + INBS] * p[1][k][l];
-                  // 2-0
-                  ydp[4][n + k][m + l] += go_t[0][n + b0[0] + INBS*2][m + b0[1] + INBS] * p[2][k][l];
-                  ydp[5][n + k][m + l] += go_t[2][n + b0[0] + INBS*2][m + b0[1] + INBS] * p[0][k][l];
-                }
-              }
-            }
-          }
-	  /*for(n = -NHP ; n < INBS + NHP ; n++){
-            for(m = -NHP ; m < BSMM + NHP ; m++){
-              for(k = -NHP ; k <= NHP ; k++){
-                for(l = -NHP ; l <= NHP ; l++){
-                  // 0-1
-                  ydp[0][n + k][m + l] += go_t[0][n + b0[0] + INBS*2][m + b0[1]] * p[1][k][l];
-                  ydp[1][n + k][m + l] += go_t[1][n + b0[0] + INBS*2][m + b0[1]] * p[0][k][l];
-                  // 1-2
-                  ydp[2][n + k][m + l] += go_t[1][n + b0[0] + INBS*2][m + b0[1]] * p[2][k][l];
-                  ydp[3][n + k][m + l] += go_t[2][n + b0[0] + INBS*2][m + b0[1]] * p[1][k][l];
-                  // 2-0
-                  ydp[4][n + k][m + l] += go_t[0][n + b0[0] + INBS*2][m + b0[1]] * p[2][k][l];
-                  ydp[5][n + k][m + l] += go_t[2][n + b0[0] + INBS*2][m + b0[1]] * p[0][k][l];
-                }
-              }
-            }
-	    }*/
-  
-	  // 差分をとる
-          for(n = 0 ; n < INBS ; n++){
-            //for(m = 0 ; m < BSMM ; m++){
-	    for(m = 0 ; m < INBS ; m++){
-              dy01[n][m] = ydp[0][n][m] - ydp[1][n][m];
-              dy12[n][m] = ydp[2][n][m] - ydp[3][n][m];
-              dy20[n][m] = ydp[4][n][m] - ydp[5][n][m];
-            }
-          }
-  
-          // 誤差EEの評価
-          EE[0] = EE[1] = EE[2] = 0.0;
-          for(n = 0 ; n < INBS ; n++){
-	    //for(m = 0 ; m < BSMM ; m++){
-	    for(m = 0 ; m < INBS ; m++){
-              EE[0] += dy01[n][m] * dy01[n][m];
-              EE[1] += dy12[n][m] * dy12[n][m];
-              EE[2] += dy20[n][m] * dy20[n][m];              
-            }
+	  }*/
+	
+	for(n = -NHP ; n < INBS + NHP ; n++){
+	  for(m = -NHP ; m < BSMM + NHP ; m++){
+	    for(k = -NHP ; k <= NHP ; k++){
+	      for(l = -NHP ; l <= NHP ; l++){
+		// 0-1
+		ydp[0][n + k][m + l] += go_t[0][n + b0[0] + INBS*2][m + b0[1]] * p[1][k][l];
+		ydp[1][n + k][m + l] += go_t[1][n + b0[0] + INBS*2][m + b0[1]] * p[0][k][l];
+		// 1-2
+		ydp[2][n + k][m + l] += go_t[1][n + b0[0] + INBS*2][m + b0[1]] * p[2][k][l];
+		ydp[3][n + k][m + l] += go_t[2][n + b0[0] + INBS*2][m + b0[1]] * p[1][k][l];
+		// 2-0
+		ydp[4][n + k][m + l] += go_t[0][n + b0[0] + INBS*2][m + b0[1]] * p[2][k][l];
+		ydp[5][n + k][m + l] += go_t[2][n + b0[0] + INBS*2][m + b0[1]] * p[0][k][l];
+	      }
+	    }
 	  }
-	  
-          // 誤差EEを最小にするd, k
-          sum_EE = EE[0] + EE[1] + EE[2];
-	  //printf("   sumEE = %f\n", sum_EE);
-          if(Emin > sum_EE){
-            Emin = sum_EE;
-            dmin = dtest;
-	    kmin = LENS_K;
+	}
+	
+	// 差分をとる
+	for(n = 0 ; n < INBS ; n++){
+	  for(m = 0 ; m < BSMM ; m++){
+	    //for(m = 0 ; m < INBS ; m++){
+	    dy01[n][m] = ydp[0][n][m] - ydp[1][n][m];
+	    dy12[n][m] = ydp[2][n][m] - ydp[3][n][m];
+	    dy20[n][m] = ydp[4][n][m] - ydp[5][n][m];
 	  }
-           fprintf(fp, "%f  %f  %f\n", LENS_K, dtest, sum_EE);
-	   fprintf(fp, "\n\n");
-	   //  }//d
-	   dp_est[bn][bm] = d_est[bn][bm] + 5*alpha;
-	   printf("    dp_est = %f\n", dp_est[bn][bm]);
+	}
+	
+	// 誤差EEの評価
+	EE[0] = EE[1] = EE[2] = 0.0;
+	for(n = 0 ; n < INBS ; n++){
+	  for(m = 0 ; m < BSMM ; m++){
+	    //for(m = 0 ; m < INBS ; m++){
+	    EE[0] += dy01[n][m] * dy01[n][m];
+	    EE[1] += dy12[n][m] * dy12[n][m];
+	    EE[2] += dy20[n][m] * dy20[n][m];              
+	  }
+	}
+	  
+	// 誤差EEを最小にするd, k
+	sum_EE = EE[0] + EE[1] + EE[2];
+	//printf("   sumEE = %f\n", sum_EE);
+	if(Emin > sum_EE){
+	  Emin = sum_EE;
+	  dmin = dtest;
+	  kmin = LENS_K;
+	}
+	fprintf(fp, "%f  %f  %f\n", LENS_K, dtest, sum_EE);
+	fprintf(fp, "\n\n");
+      }//d
+      //dp_est[bn][bm] = d_est[bn][bm] + 5*alpha;
+      dp_est[bn][bm]  = dmin;
+      printf("    dp_est = %f\n", dp_est[bn][bm]);
     }
   }
   printf("\n");
-  
-  // d0を求めたので、αを求める
+
+  //-----------------------------------------------------------------------------
+  // d0を求めたので、dmを求める
   printf("---dm start---\n");
   for(bn = 0 ; bn < NNB ; bn++){ // 20 * 13
     printf("bn = %d\n", bn);
@@ -863,26 +881,32 @@ int main(void){
       bc[1] = b0[1] + hbsm;
 
       alpha = (dmax[bn] - d_est[bn][bm])/hbsn;
+      //alpha = (d_est[bn][bm] - d_min[bn])/7;
+      //printf(" alpha = %f\n", alpha);
       dmin = 0.0;
       kmin = 0.0;
+      d_tmp = 0.0;
       Emin = LRG;
       sprintf(flnm, "./Edk/Edmk%02d_%02d.dat", bn, bm);
       fp = fopen(flnm, "w");
 
+      d_tmp = d_est[bn][bm] - INBS*alpha;
+      printf(" d_tmp = %f\n", d_tmp);
+      
       // d,kに対するEの最小値探索
       // DD ni sita
-      //for(dtest = 1.0 - DD_F*DDN ; dtest <= 1.0 + DD_F*DDN ; dtest+=DD_F){
+      for(dtest = d_tmp - 0.01 ; dtest <= d_tmp + 0.01 ; dtest+=DD){
           // p0, p1, p2を生成
       for(zn = 0 ; zn < NZ ; zn++){
 	z = ZA + DZ * (double)zn;
-	sgm = LENS_K * fabs(z - (d_est[bn][bm] - 5*alpha));
+	sgm = LENS_K * fabs(z - dtest);
 	hsamp_gauss(2*NHP + 1, sgm, p[zn]);
       }
 
 	  // y[0]~y[5]をクリア
           for(n = -2*NHP ; n < INBS + 2*NHP ; n++){
-	    for(m = -2*NHP ; m < INBS + 2*NHP ; m++){
-	      //for(m = -2*NHP ; m < BSMM + 2*NHP ; m++){
+	    //for(m = -2*NHP ; m < INBS + 2*NHP ; m++){
+	      for(m = -2*NHP ; m < BSMM + 2*NHP ; m++){
 	      ydm[0][n][m] = 0.0;
 	      ydm[1][n][m] = 0.0;
 	      ydm[2][n][m] = 0.0;
@@ -893,24 +917,24 @@ int main(void){
 	  }
 	  
           // y[0]~y[5]を生成
-          for(n = -NHP ; n < INBS + NHP ; n++){
+          /*for(n = -NHP ; n < INBS + NHP ; n++){
             for(m = -NHP ; m < INBS + NHP ; m++){
               for(k = -NHP ; k <= NHP ; k++){
                 for(l = -NHP ; l <= NHP ; l++){
-                  // 0-1
-                  ydm[0][n + k][m + l] += go_t[0][n + b0[0]][m + b0[1] + INBS] * p[1][k][l];
-                  ydm[1][n + k][m + l] += go_t[1][n + b0[0]][m + b0[1] + INBS] * p[0][k][l];
-                  // 1-2
-                  ydm[2][n + k][m + l] += go_t[1][n + b0[0]][m + b0[1] + INBS] * p[2][k][l];
-                  ydm[3][n + k][m + l] += go_t[2][n + b0[0]][m + b0[1] + INBS] * p[1][k][l];
-                  // 2-0
-                  ydm[4][n + k][m + l] += go_t[0][n + b0[0]][m + b0[1] + INBS] * p[2][k][l];
-                  ydm[5][n + k][m + l] += go_t[2][n + b0[0]][m + b0[1] + INBS] * p[0][k][l];
+		  // 0-1
+		  ydm[0][n + k][m + l] += go_t[0][n + b0[0]][m + b0[1] + INBS] * p[1][k][l];
+		  ydm[1][n + k][m + l] += go_t[1][n + b0[0]][m + b0[1] + INBS] * p[0][k][l];
+		  // 1-2
+		  ydm[2][n + k][m + l] += go_t[1][n + b0[0]][m + b0[1] + INBS] * p[2][k][l];
+		  ydm[3][n + k][m + l] += go_t[2][n + b0[0]][m + b0[1] + INBS] * p[1][k][l];
+		  // 2-0
+		  ydm[4][n + k][m + l] += go_t[0][n + b0[0]][m + b0[1] + INBS] * p[2][k][l];
+		  ydm[5][n + k][m + l] += go_t[2][n + b0[0]][m + b0[1] + INBS] * p[0][k][l];
                 }
               }
             }
-          }
-	  /*for(n = -NHP ; n < INBS + NHP ; n++){
+	    }*/
+	  for(n = -NHP ; n < INBS + NHP ; n++){
 	    for(m = -NHP ; m < BSMM + NHP ; m++){
               for(k = -NHP ; k <= NHP ; k++){
                 for(l = -NHP ; l <= NHP ; l++){
@@ -926,12 +950,12 @@ int main(void){
                 }
               }
             }
-	    }*/
+	  }
   
 	  // 差分をとる
           for(n = 0 ; n < INBS ; n++){
-            for(m = 0 ; m < INBS ; m++){
-	      //for(m = 0 ; m < BSMM ; m++){
+            //for(m = 0 ; m < INBS ; m++){
+	      for(m = 0 ; m < BSMM ; m++){
               dy01[n][m] = ydm[0][n][m] - ydm[1][n][m];
               dy12[n][m] = ydm[2][n][m] - ydm[3][n][m];
               dy20[n][m] = ydm[4][n][m] - ydm[5][n][m];
@@ -941,8 +965,8 @@ int main(void){
           // 誤差EEの評価
           EE[0] = EE[1] = EE[2] = 0.0;
           for(n = 0 ; n < INBS ; n++){
-	    //for(m = 0 ; m < BSMM ; m++){
-            for(m = 0 ; m < INBS ; m++){
+	    for(m = 0 ; m < BSMM ; m++){
+	      //for(m = 0 ; m < INBS ; m++){
               EE[0] += dy01[n][m] * dy01[n][m];
               EE[1] += dy12[n][m] * dy12[n][m];
               EE[2] += dy20[n][m] * dy20[n][m];              
@@ -959,8 +983,9 @@ int main(void){
 	  }
            fprintf(fp, "%f  %f  %f\n", LENS_K, dtest, sum_EE);
 	   fprintf(fp, "\n\n");
-	   //  }//d
-       dm_est[bn][bm] = d_est[bn][bm] - 5*alpha;
+      }//d
+      // dm_est[bn][bm] = d_est[bn][bm] - 5*alpha;
+      dm_est[bn][bm] = dmin;
        printf("    dm_est = %f\n", dm_est[bn][bm]);
     }
   }
@@ -998,14 +1023,14 @@ int main(void){
   // dp_model
   for(n = 0 ; n < NNB ; n++){
     for(m = 0 ; m < MMB ; m++){
-      dp_model[n][m] = d[n*15*K + 12*K][0];
+      dp_model[n][m] = d[n*BSNN*K + ((BSNN-1)/2 + INBS)*K][0];
     }
   }
   sprintf(flnm, "./dp_model.dat");
   fp = fopen(flnm, "w");
   for(bn = 0 ; bn < NNB ; bn++){
     for(bm = 0 ; bm < MMB ; bm++){
-      fprintf(fp, "%4d %4d  %f\n", bn*BSNN + 12, bm*BSMM + hbsm, dp_model[bn][bm]);
+      fprintf(fp, "%4d %4d  %f\n", bn*BSNN + hbsn + INBS, bm*BSMM + hbsm, dp_model[bn][bm]);
     }
     fprintf(fp, "\n");
   }
@@ -1014,14 +1039,14 @@ int main(void){
    // dm_model
   for(n = 0 ; n < NNB ; n++){
     for(m = 0 ; m < MMB ; m++){
-      dm_model[n][m] = d[n*15*K + 2*K][0];
+      dm_model[n][m] = d[n*BSNN*K + ((BSNN-1)/2 - INBS)*K][0];
     }
   }
   sprintf(flnm, "./dm_model.dat");
   fp = fopen(flnm, "w");
   for(bn = 0 ; bn < NNB ; bn++){
     for(bm = 0 ; bm < MMB ; bm++){
-      fprintf(fp, "%4d %4d  %f\n", bn*BSNN + 2, bm*BSMM + hbsm, dm_model[bn][bm]);
+      fprintf(fp, "%4d %4d  %f\n", bn*BSNN + hbsn - INBS, bm*BSMM + hbsm, dm_model[bn][bm]);
     }
     fprintf(fp, "\n");
   }
@@ -1057,7 +1082,7 @@ int main(void){
   for(bn = 0 ; bn < NNB ; bn++){
     for(bm = 0 ; bm < MMB ; bm++){
       fprintf(fp, "%4d %4d  %f\n",
-              bn*BSNN + 12, bm*BSMM + hbsm, dp_est[bn][bm]);
+              bn*BSNN + hbsn + INBS, bm*BSMM + hbsm, dp_est[bn][bm]);
     }
     fprintf(fp, "\n");
   }
@@ -1069,7 +1094,7 @@ int main(void){
   for(bn = 0 ; bn < NNB ; bn++){
     for(bm = 0 ; bm < MMB ; bm++){
       fprintf(fp, "%4d %4d  %f\n",
-              bn*BSNN + 2, bm*BSMM + hbsm, dm_est[bn][bm]);
+              bn*BSNN + hbsn - INBS, bm*BSMM + hbsm, dm_est[bn][bm]);
     }
     fprintf(fp, "\n");
   }
